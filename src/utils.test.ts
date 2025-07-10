@@ -13,6 +13,7 @@ import {
 	envConnectToken,
 	envManagedVariables,
 	envServiceAccountToken,
+	envVaultItem,
 } from "./constants";
 
 jest.mock("@actions/core");
@@ -144,6 +145,114 @@ describe("loadSecrets", () => {
 			expect(core.exportVariable).not.toHaveBeenCalled();
 		});
 	});
+
+	describe('with OP_VAULT_ITEM_OPTION', () => {
+		const mockVaultItemOutput = `
+ID:          some_vault_item_id
+Title:       some_item
+Vault:       some_vault (some_vault_id)
+Created:     1 day ago
+Updated:     1 hour ago by Dave @ WhereWeGo
+Favorite:    false
+Version:     2
+Category:    SECURE_NOTE
+Fields:
+  notesPlain:                            a skippable note
+  SECRET_1:                              some secret
+  SECRET_2:                              abc123
+`;
+
+		beforeEach(() => {
+			(exec.getExecOutput as jest.Mock).mockClear();
+		});
+
+		afterEach(() => {
+			delete process.env[envVaultItem];
+		});
+
+		it('throws error for invalid vault item format', async () => {
+			process.env[envVaultItem] = "invalid-format";
+			
+			await expect(loadSecrets(true)).rejects.toThrow('Invalid vault item format: invalid-format');
+		});
+
+		it('throws error for vault item format targeting an individual field', async () => {
+			process.env[envVaultItem] = "op://vault/item/some_item";
+			
+			await expect(loadSecrets(true)).rejects.toThrow('Invalid vault item format: op://vault/item/some_item');
+		});
+
+		it('fetches all secrets from the vault item and exports as environment variables', async () => {
+			process.env[envVaultItem] = "op://vault/some_item";
+			(exec.getExecOutput as jest.Mock).mockResolvedValueOnce({
+				stdout: mockVaultItemOutput
+			});
+
+			await loadSecrets(true);
+
+			expect(exec.getExecOutput).toHaveBeenCalledWith('sh -c "op item get op://vault/some_item --reveal"');
+			expect(core.exportVariable).toHaveBeenCalledWith('SECRET_1', 'some secret');
+			expect(core.exportVariable).toHaveBeenCalledWith('SECRET_2', 'abc123');
+			expect(core.exportVariable).toHaveBeenCalledWith(envManagedVariables, 'SECRET_1,SECRET_2');
+			expect(core.setSecret).toHaveBeenCalledWith('some secret');
+			expect(core.setSecret).toHaveBeenCalledWith('abc123');
+		});
+
+		it('fetches all secrets from the vault item and sets as step outputs', async () => {
+			process.env[envVaultItem] = "op://vault/some_item";
+			(exec.getExecOutput as jest.Mock).mockResolvedValueOnce({
+				stdout: mockVaultItemOutput
+			});
+
+			await loadSecrets(false);
+
+			expect(exec.getExecOutput).toHaveBeenCalledWith('sh -c "op item get op://vault/some_item --reveal"');
+			expect(core.setOutput).toHaveBeenCalledWith('SECRET_1', 'some secret');
+			expect(core.setOutput).toHaveBeenCalledWith('SECRET_2', 'abc123');
+			expect(core.exportVariable).not.toHaveBeenCalledWith(envManagedVariables, expect.any(String));
+			expect(core.setSecret).toHaveBeenCalledWith('some secret');
+			expect(core.setSecret).toHaveBeenCalledWith('abc123');
+		});
+
+		it('skips notesPlain field', async () => {
+			process.env[envVaultItem] = "op://vault/some_item";
+			(exec.getExecOutput as jest.Mock).mockResolvedValueOnce({
+				stdout: mockVaultItemOutput
+			});
+
+			await loadSecrets(true);
+
+			expect(core.exportVariable).not.toHaveBeenCalledWith('notesPlain', expect.any(String));
+			expect(core.setOutput).not.toHaveBeenCalledWith('notesPlain', expect.any(String));
+			expect(core.setSecret).not.toHaveBeenCalledWith('will be loaded in "deploy-preview.yml" GH Action');
+		});
+
+		it('returns early and does not process individual env vars when vault item is provided', async () => {
+			process.env[envVaultItem] = "op://vault/some_item";
+			(exec.getExecOutput as jest.Mock).mockResolvedValueOnce({
+				stdout: mockVaultItemOutput
+			});
+
+			await loadSecrets(true);
+
+			// Should only call exec.getExecOutput once for the vault item, not for "op env ls"
+			expect(exec.getExecOutput).toHaveBeenCalledTimes(1);
+			expect(exec.getExecOutput).toHaveBeenCalledWith('sh -c "op item get op://vault/some_item --reveal"');
+			expect(exec.getExecOutput).not.toHaveBeenCalledWith('sh -c "op env ls"');
+		});
+
+		it('handles empty vault item output gracefully', async () => {
+			process.env[envVaultItem] = "op://vault/some_item";
+			(exec.getExecOutput as jest.Mock).mockResolvedValueOnce({
+				stdout: ""
+			});
+
+			await loadSecrets(true);
+
+			expect(exec.getExecOutput).toHaveBeenCalledWith('sh -c "op item get op://vault/some_item --reveal"');
+			expect(core.exportVariable).not.toHaveBeenCalledWith(envManagedVariables, expect.any(String));
+		});
+	})
 });
 
 describe("unsetPrevious", () => {
